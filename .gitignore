@@ -136,6 +136,10 @@ celerybeat.pid
 
 # Environments
 .env
+credentials.json
+.streamlit/
+processed_tokens.txt
+*.pdf
 .envrc
 .venv
 env/
