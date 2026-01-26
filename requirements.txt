@@ -4,3 +4,5 @@ gspread
 google-auth
 requests
 pymupdf
+google-generativeai
+fpdf
