@@ -47,7 +47,7 @@ def extract_data_with_gemini(text_content):
     """Dağınık CV metnini standart JSON formatına çevirir."""
 
     # 'flash' modeli en hızlısıdır.
-    model = genai.GenerativeModel('gemini-1.5-flash')
+    model = genai.GenerativeModel('gemini-3-flash-preview')
 
     # Prompt'u biraz kısalttık ki AI daha hızlı okusun
     prompt = f"""
@@ -59,10 +59,11 @@ def extract_data_with_gemini(text_content):
         "name": "Full Name",
         "title": "Title",
         "location": "City",
-        "contact": "Email | Phone | Links",
+        "summary": "Professional summary, objective, or 'about me' section text",
         "education": [{{ "degree": "", "school": "", "year": "" }}],
         "experience": [{{ "role": "", "company": "", "description": "Brief summary" }}],
         "projects": [{{ "name": "", "tech": "", "details": "Brief summary" }}],
+        "certificates": [{{ "name": "Certificate Name", "issuer": "Issuing Organization", "year": "Year" }}],
         "skills": {{ "tech": "List of skills" }},
         "spoken_languages": "List",
         "interests": "List"
@@ -81,50 +82,84 @@ def extract_data_with_gemini(text_content):
 
 
 class PDF(FPDF):
+    def __init__(self, font_family='Arial'):
+        super().__init__()
+        self.font_family = font_family
+
     def header(self):
-        pass  # Header istemiyoruz, manuel çizeceğiz
+        pass
 
     def section_title(self, label):
-        self.set_font('Arial', 'B', 12)
-        self.set_text_color(0, 51, 102)  # Koyu Mavi Ton
+        # 'B' (Bold) için font ailesi desteği gerekir.
+        # Eğer özel font (DejaVu) kullanıyorsan ve Bold dosyasını yüklemediysen
+        # standart Arial'a düşebilir veya hata verebilir.
+        # Güvenlik için burada font_family değişkenini kullanıyoruz.
+        self.set_font(self.font_family, 'B', 12)
+        self.set_text_color(0, 51, 102)
         self.cell(0, 10, label, 0, 1, 'L')
-        self.line(10, self.get_y(), 200, self.get_y())  # Alt çizgi
+        self.line(10, self.get_y(), 200, self.get_y())
         self.ln(2)
 
     def section_body(self, text):
-        self.set_font('Arial', '', 10)
+        self.set_font(self.font_family, '', 10)
         self.set_text_color(0, 0, 0)
         self.multi_cell(0, 5, text)
         self.ln()
 
 
 def create_standardized_pdf(json_data):
-    """JSON verisinden 'Büşra Alaka' formatında PDF üretir."""
-    pdf = PDF()
+    """JSON verisinden PDF üretir (Özet ve Sertifikalar Eklendi)."""
+
+    # 1. Font Kontrolü
+    font_path = "DejaVuSans.ttf"
+    if not os.path.exists(font_path):
+        font_path = "Arial.ttf"
+
+    has_custom_font = os.path.exists(font_path)
+
+    # 2. PDF Başlatma
+    if has_custom_font:
+        pdf = PDF(font_family='TrFont')
+        # Normal, Bold, Italic, BoldItalic hepsi için aynı fontu tanımlıyoruz (Hata almamak için)
+        pdf.add_font('TrFont', '', font_path, uni=True)
+        pdf.add_font('TrFont', 'B', font_path, uni=True)
+        pdf.add_font('TrFont', 'I', font_path, uni=True)
+        pdf.add_font('TrFont', 'BI', font_path, uni=True)
+    else:
+        st.warning("⚠️ Türkçe font dosyası bulunamadı. Karakterler dönüştürülüyor.")
+        json_data = sanitize_json_recursively(json_data)
+        pdf = PDF(font_family='Arial')
+
     pdf.add_page()
+    main_font = pdf.font_family
 
     # --- ÜST BİLGİ (HEADER) ---
-    pdf.set_font('Arial', 'B', 16)
+    pdf.set_font(main_font, 'B', 16)
     pdf.cell(0, 10, json_data.get('name', ''), 0, 1, 'C')
 
-    pdf.set_font('Arial', 'I', 12)
+    pdf.set_font(main_font, 'I', 12)
     pdf.cell(0, 8, json_data.get('title', ''), 0, 1, 'C')
 
-    pdf.set_font('Arial', '', 10)
+    pdf.set_font(main_font, '', 10)
     pdf.cell(0, 6, json_data.get('location', ''), 0, 1, 'C')
 
-    # İletişim (Sansürlü ise sansürlü gelir)
-    pdf.set_font('Arial', '', 9)
+    pdf.set_font(main_font, '', 9)
     pdf.cell(0, 6, json_data.get('contact', ''), 0, 1, 'C')
-    pdf.ln(10)
+    pdf.ln(5)
+
+    # --- 🆕 SUMMARY (HAKKIMDA) ---
+    if json_data.get('summary'):
+        pdf.ln(5)  # Biraz boşluk
+        pdf.section_title('PROFESSIONAL SUMMARY')
+        pdf.section_body(json_data['summary'])
 
     # --- EDUCATION ---
     if json_data.get('education'):
         pdf.section_title('EDUCATION')
         for edu in json_data['education']:
-            pdf.set_font('Arial', 'B', 10)
+            pdf.set_font(main_font, 'B', 10)
             pdf.cell(0, 5, f"{edu['degree']}", 0, 1)
-            pdf.set_font('Arial', '', 10)
+            pdf.set_font(main_font, '', 10)
             pdf.cell(0, 5, f"{edu['school']} | {edu['year']}", 0, 1)
             pdf.ln(2)
 
@@ -132,12 +167,12 @@ def create_standardized_pdf(json_data):
     if json_data.get('experience'):
         pdf.section_title('EXPERIENCE')
         for exp in json_data['experience']:
-            pdf.set_font('Arial', 'B', 10)
+            pdf.set_font(main_font, 'B', 10)
             pdf.write(5, f"{exp['role']} | ")
-            pdf.set_font('Arial', 'I', 10)
+            pdf.set_font(main_font, 'I', 10)
             pdf.write(5, f"{exp['company']}")
             pdf.ln(6)
-            pdf.set_font('Arial', '', 9)
+            pdf.set_font(main_font, '', 9)
             pdf.multi_cell(0, 5, f"- {exp['description']}")
             pdf.ln(3)
 
@@ -145,26 +180,45 @@ def create_standardized_pdf(json_data):
     if json_data.get('projects'):
         pdf.section_title('PROJECTS')
         for proj in json_data['projects']:
-            pdf.set_font('Arial', 'B', 10)
+            pdf.set_font(main_font, 'B', 10)
             pdf.write(5, f"{proj['name']}")
             if proj.get('tech'):
-                pdf.set_font('Arial', 'I', 9)
+                pdf.set_font(main_font, 'I', 9)
                 pdf.write(5, f" ({proj['tech']})")
             pdf.ln(6)
-            pdf.set_font('Arial', '', 9)
+            pdf.set_font(main_font, '', 9)
             pdf.multi_cell(0, 5, f"{proj['details']}")
             pdf.ln(3)
+
+    # --- 🆕 CERTIFICATES (SERTİFİKALAR) ---
+    if json_data.get('certificates'):
+        pdf.section_title('CERTIFICATES')
+        for cert in json_data['certificates']:
+            pdf.set_font(main_font, 'B', 10)
+            pdf.write(5, f"• {cert.get('name', '')}")
+
+            # Kurum ve Yıl bilgisi varsa parantez içinde ekleyelim
+            extras = []
+            if cert.get('issuer'): extras.append(cert['issuer'])
+            if cert.get('year'): extras.append(cert['year'])
+
+            if extras:
+                pdf.set_font(main_font, '', 10)
+                pdf.write(5, f" ({' - '.join(extras)})")
+
+            pdf.ln(5)
+        pdf.ln(2)
 
     # --- SKILLS ---
     if json_data.get('skills'):
         pdf.section_title('TECHNICAL SKILLS')
         skills = json_data['skills']
-        pdf.set_font('Arial', '', 10)
+        pdf.set_font(main_font, '', 10)
         if isinstance(skills, dict):
             for k, v in skills.items():
-                pdf.set_font('Arial', 'B', 10)
+                pdf.set_font(main_font, 'B', 10)
                 pdf.write(5, f"{k.capitalize()}: ")
-                pdf.set_font('Arial', '', 10)
+                pdf.set_font(main_font, '', 10)
                 pdf.write(5, v)
                 pdf.ln(5)
         else:
@@ -181,12 +235,38 @@ def create_standardized_pdf(json_data):
         pdf.section_title('INTERESTS')
         pdf.section_body(json_data['interests'])
 
-    return pdf.output(dest='S').encode('latin-1', 'replace')  # Byte olarak döndür
-
-
+    return pdf.output(dest='S').encode('latin-1', 'replace')
 # ==========================================
 # 🛠️ YARDIMCI FONKSİYONLAR
 # ==========================================
+def sanitize_text(text):
+    """Türkçe karakterleri İngilizce karşılıklarına çevirir (Font yoksa kullanılır)."""
+    if not isinstance(text, str):
+        return str(text)
+
+    replacements = {
+        'Ş': 'S', 'ş': 's',
+        'Ğ': 'G', 'ğ': 'g',
+        'İ': 'I', 'ı': 'i',
+        'Ö': 'O', 'ö': 'o',
+        'Ü': 'U', 'ü': 'u',
+        'Ç': 'C', 'ç': 'c'
+    }
+    for tr, eng in replacements.items():
+        text = text.replace(tr, eng)
+    return text.encode('latin-1', 'replace').decode('latin-1')
+
+
+def sanitize_json_recursively(data):
+    """JSON içindeki tüm metinleri temizler."""
+    if isinstance(data, dict):
+        return {k: sanitize_json_recursively(v) for k, v in data.items()}
+    elif isinstance(data, list):
+        return [sanitize_json_recursively(i) for i in data]
+    elif isinstance(data, str):
+        return sanitize_text(data)
+    else:
+        return data
 
 @st.cache_data(ttl=600, show_spinner=False)
 def load_data():
