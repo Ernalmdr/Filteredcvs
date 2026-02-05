@@ -3,6 +3,12 @@ pandas
 gspread
 google-auth
 requests
-pymupdf
 google-generativeai
 fpdf
+flask
+pymupdf
+google-generativeai
+google-api-python-client
+google-auth
+fpdf2
+gunicorn

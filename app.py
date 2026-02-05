@@ -433,3 +433,5 @@ if not df.empty:
                                     )
                     else:
                         st.error("PDF indirilemedi.")
+
+
