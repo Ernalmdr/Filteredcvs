@@ -67,18 +67,34 @@ class StandardPDF(FPDF):
 def extract_and_categorize_with_gemini(text_content):
     # ÇÖZÜM 1: Modeli en yüksek kotalı 'flash' modeline çekiyoruz
     model = genai.GenerativeModel('gemini-2.5-flash')
+    categories_str = ", ".join(ALLOWED_CATEGORIES)
 
-    prompt = f"Act as an HR expert. Extract CV data into JSON. CV: {text_content}"
-
+    prompt = f"""
+        Act as an HR expert. Extract data from this CV into JSON and suggest categories from [{categories_str}].
+        Return ONLY JSON. No markdown.
+        JSON Schema:
+        {{
+            "candidate_data": {{
+                "name": "", "title": "", "location": "", "summary": "",
+                "education": [{{ "degree": "", "school": "", "year": "" }}],
+                "experience": [{{ "role": "", "company": "", "description": "" }}],
+                "skills": {{ "tech": "" }},
+                "spoken_languages": ""
+            }},
+            "suggested_categories": []
+        }}
+        CV TEXT:
+        {text_content}
+        """
     try:
-        # ÇÖZÜM 2: İstek göndermeden önce 1 saniye nefes payı
-        time.sleep(1)
+        # Dakikalık istek limitine takılmamak için kısa bir bekleme
+        time.sleep(2)
         response = model.generate_content(prompt)
-        return json.loads(response.text.replace("```json", "").replace("```", "").strip())
+
+        # Markdown bloklarını temizleyip JSON'a çevirme
+        json_str = response.text.replace("```json", "").replace("```", "").strip()
+        return json.loads(json_str)
     except Exception as e:
-        if "429" in str(e):
-            print("⚠️ KOTA DOLDU: 60 saniye bekleniyor...")
-            time.sleep(60)  # Kota hatası alırsan botu 1 dakika uyut
         print(f"Gemini Hatası: {e}")
         return None
 
@@ -117,38 +133,49 @@ def get_or_create_folder(folder_name, parent_id):
 # 🚀 CORE İŞLEME FONKSİYONU
 # ==========================================
 def process_cv(candidate_name, pdf_url):
-    doc = None
     try:
+        target_filename = f"{candidate_name}_Standard.pdf"
         print(f"İşlem kontrol ediliyor: {candidate_name}")
+
         headers = {"Authorization": f"Bearer {TYPEFORM_TOKEN}"}
         resp = requests.get(pdf_url, headers=headers)
-        if resp.status_code == 200:
-            doc = fitz.open(stream=resp.content, filetype="pdf")
-            full_text = "".join([p.get_text() for p in doc])
-            doc.close()  # BELLEĞİ HEMEN BOŞALT
 
+        if resp.status_code == 200:
+            # 'with' bloğu kullanılarak PDF dosyasının açık kalması engellenir
+            with fitz.open(stream=resp.content, filetype="pdf") as doc:
+                full_text = "".join([page.get_text() for page in doc])
+
+            # PDF metni alındı ve dosya güvenle kapatıldı. Şimdi AI analizine geçiyoruz.
             analysis = extract_and_categorize_with_gemini(full_text)
+
             if analysis:
                 new_pdf_bytes = create_standard_pdf_bytes(analysis)
                 categories = analysis.get("suggested_categories", ["Others"])
+
                 for cat in categories:
                     folder_id = get_or_create_folder(cat, ROOT_FOLDER_ID)
 
-                    # Duplicate Kontrolü
-                    check_query = f"name = '{candidate_name}_Standard.pdf' and '{folder_id}' in parents and trashed = false"
+                    # MÜKERRER KONTROLÜ: Drive'da aynı dosya var mı?
+                    check_query = f"name = '{target_filename}' and '{folder_id}' in parents and trashed = false"
                     existing = drive_service.files().list(q=check_query).execute().get('files', [])
-                    if existing: continue
 
+                    if existing:
+                        print(f"⚠️ Atlandı: {target_filename} zaten {cat} klasöründe mevcut.")
+                        continue
+
+                    # Dosya yoksa yükle
                     media = MediaIoBaseUpload(io.BytesIO(new_pdf_bytes), mimetype='application/pdf')
-                    file_meta = {'name': f"{candidate_name}_Standard.pdf", 'parents': [folder_id]}
+                    file_meta = {'name': target_filename, 'parents': [folder_id]}
                     drive_service.files().create(body=file_meta, media_body=media).execute()
-                print(f"✅ Başarılı: {candidate_name}")
+                    print(f"✅ Yüklendi: {candidate_name} -> {cat}")
+
                 return True
+        else:
+            print(f"❌ PDF İndirilemedi. Hata Kodu: {resp.status_code}")
     except Exception as e:
-        if doc: doc.close()
-        print(f"❌ Hata: {str(e)}")
+        print(f"❌ Kritik Hata: {str(e)}")
     finally:
-        gc.collect()  # RAM TEMİZLİĞİ
+        gc.collect()  # Belleği temizleyerek SIGKILL hatasını önler
     return False
 
 
