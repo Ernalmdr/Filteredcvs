@@ -9,6 +9,7 @@ from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload
 from fpdf import FPDF
+import gspread  # Eski kayıtlar için gerekli
 
 app = Flask(__name__)
 
@@ -37,14 +38,36 @@ FONT_PATH = os.path.join(os.getcwd(), "DejaVuSans.ttf")
 
 
 # ==========================================
-# 🧠 GEMINI & PDF FONKSİYONLARI
+# 🧠 PDF VE GEMINI YARDIMCI SINIFLARI
 # ==========================================
 
-def extract_and_categorize_with_gemini(text_content):
-    # Model ismini stabil sürümle güncelledik
-    model = genai.GenerativeModel('gemini-3-flash-preview')
-    categories_str = ", ".join(ALLOWED_CATEGORIES)
+class StandardPDF(FPDF):
+    def __init__(self):
+        super().__init__()
+        if os.path.exists(FONT_PATH):
+            self.add_font('DejaVu', '', FONT_PATH, uni=True)
+            self.add_font('DejaVu', 'B', FONT_PATH, uni=True)
+            self.font_family_name = 'DejaVu'
+        else:
+            self.font_family_name = 'Arial'
 
+    def section_title(self, label):
+        self.set_font(self.font_family_name, 'B', 12)
+        self.set_text_color(0, 51, 102)
+        self.cell(0, 10, label, 0, 1, 'L')
+        self.line(10, self.get_y(), 200, self.get_y())
+        self.ln(2)
+
+    def section_body(self, text):
+        self.set_font(self.font_family_name, '', 10)
+        self.set_text_color(0, 0, 0)
+        self.multi_cell(0, 5, str(text))
+        self.ln()
+
+
+def extract_and_categorize_with_gemini(text_content):
+    model = genai.GenerativeModel('gemini-1.5-flash')
+    categories_str = ", ".join(ALLOWED_CATEGORIES)
     prompt = f"""
     Act as an HR expert. Extract data from this CV into JSON and suggest categories from [{categories_str}].
     Return ONLY JSON. No markdown.
@@ -71,30 +94,6 @@ def extract_and_categorize_with_gemini(text_content):
         return None
 
 
-class StandardPDF(FPDF):
-    def __init__(self):
-        super().__init__()
-        if os.path.exists(FONT_PATH):
-            self.add_font('DejaVu', '', FONT_PATH, uni=True)
-            self.add_font('DejaVu', 'B', FONT_PATH, uni=True)
-            self.font_family_name = 'DejaVu'
-        else:
-            self.font_family_name = 'Arial'
-
-    def section_title(self, label):
-        self.set_font(self.font_family_name, 'B', 12)
-        self.set_text_color(0, 51, 102)
-        self.cell(0, 10, label, 0, 1, 'L')
-        self.line(10, self.get_y(), 200, self.get_y())
-        self.ln(2)
-
-    def section_body(self, text):
-        self.set_font(self.font_family_name, '', 10)
-        self.set_text_color(0, 0, 0)
-        self.multi_cell(0, 5, str(text))
-        self.ln()
-
-
 def create_standard_pdf_bytes(json_data):
     pdf = StandardPDF()
     pdf.add_page()
@@ -110,87 +109,109 @@ def create_standard_pdf_bytes(json_data):
     if c.get('summary'):
         pdf.section_title('PROFESSIONAL SUMMARY')
         pdf.section_body(c['summary'])
-
     if c.get('education'):
         pdf.section_title('EDUCATION')
         for edu in c['education']:
             pdf.section_body(f"{edu.get('degree')} - {edu.get('school')} ({edu.get('year')})")
-
     if c.get('experience'):
         pdf.section_title('EXPERIENCE')
         for exp in c['experience']:
             pdf.section_body(f"{exp.get('role')} | {exp.get('company')}\n{exp.get('description')}")
-
     if c.get('skills'):
         pdf.section_title('SKILLS')
         pdf.section_body(str(c['skills']))
 
-    # fpdf2'de dest='S' zaten bytes döner
     return pdf.output()
 
-
-# ==========================================
-# 🛠️ YARDIMCI ARAÇLAR
-# ==========================================
 
 def get_or_create_folder(folder_name, parent_id):
     query = f"name = '{folder_name}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false and '{parent_id}' in parents"
     results = drive_service.files().list(q=query).execute().get('files', [])
     if results:
         return results[0]['id']
-
     meta = {'name': folder_name, 'mimeType': 'application/vnd.google-apps.folder', 'parents': [parent_id]}
     return drive_service.files().create(body=meta, fields='id').execute().get('id')
 
 
 # ==========================================
-# 🚀 WEBHOOK VE İŞLEME
+# 🚀 ANA İŞLEME FONKSİYONU (CORE PROCESS)
+# ==========================================
+
+def process_cv(candidate_name, pdf_url):
+    """Hem Webhook hem de Toplu İşlem bu fonksiyonu kullanır."""
+    try:
+        print(f"İşlem başlıyor: {candidate_name}")
+        headers = {"Authorization": f"Bearer {TYPEFORM_TOKEN}"}
+        resp = requests.get(pdf_url, headers=headers)
+
+        if resp.status_code == 200:
+            doc = fitz.open(stream=resp.content, filetype="pdf")
+            full_text = "".join([p.get_text() for p in doc])
+            analysis = extract_and_categorize_with_gemini(full_text)
+
+            if analysis:
+                new_pdf_bytes = create_standard_pdf_bytes(analysis)
+                categories = analysis.get("suggested_categories", ["Others"])
+
+                for cat in categories:
+                    folder_id = get_or_create_folder(cat, ROOT_FOLDER_ID)
+                    media = MediaIoBaseUpload(io.BytesIO(new_pdf_bytes), mimetype='application/pdf')
+                    file_meta = {'name': f"{candidate_name}_Standard.pdf", 'parents': [folder_id]}
+                    drive_service.files().create(body=file_meta, media_body=media).execute()
+
+                print(f"✅ Başarılı: {candidate_name} -> {categories}")
+                return True
+        else:
+            print(f"❌ PDF İndirilemedi: {resp.status_code}")
+    except Exception as e:
+        print(f"❌ Hata: {str(e)}")
+    return False
+
+
+# ==========================================
+# 🌐 ENDPOINTLER (WEB ADRESLERİ)
 # ==========================================
 
 @app.route('/webhook', methods=['POST'])
 def handle_typeform():
     payload = request.json
     answers = payload.get('form_response', {}).get('answers', [])
-
     candidate_name = "Aday"
     pdf_url = ""
 
     for ans in answers:
-        # Typeform field ID'sine göre kontrol etmek daha garantidir ama tip üzerinden devam ediyoruz
         if ans.get('type') == 'text' and candidate_name == "Aday":
             candidate_name = ans.get('text', 'Aday')
         if ans.get('type') == 'file_url':
             pdf_url = ans.get('file_url')
 
     if pdf_url:
-        try:
-            print(f"İşlem başlıyor: {candidate_name}")
-            headers = {"Authorization": f"Bearer {TYPEFORM_TOKEN}"}
-            resp = requests.get(pdf_url, headers=headers)
-
-            if resp.status_code == 200:
-                doc = fitz.open(stream=resp.content, filetype="pdf")
-                full_text = "".join([p.get_text() for p in doc])
-
-                analysis = extract_and_categorize_with_gemini(full_text)
-
-                if analysis:
-                    new_pdf_bytes = create_standard_pdf_bytes(analysis)
-                    categories = analysis.get("suggested_categories", ["Others"])
-
-                    for cat in categories:
-                        folder_id = get_or_create_folder(cat, ROOT_FOLDER_ID)
-                        media = MediaIoBaseUpload(io.BytesIO(new_pdf_bytes), mimetype='application/pdf')
-                        file_meta = {'name': f"{candidate_name}_Standard.pdf", 'parents': [folder_id]}
-                        drive_service.files().create(body=file_meta, media_body=media).execute()
-
-                    print(f"✅ Başarılı: {candidate_name} -> {categories}")
-            else:
-                print(f"❌ PDF İndirilemedi: {resp.status_code}")
-        except Exception as e:
-            print(f"❌ Hata: {str(e)}")
-
+        process_cv(candidate_name, pdf_url)
     return "OK", 200
+
+
+@app.route('/process_old_submissions', methods=['GET'])
+def process_old_submissions():
+    try:
+        gc = gspread.authorize(creds)
+        spreadsheet_name = "İZMİR CV Form"
+        sheet = gc.open(spreadsheet_name).get_worksheet(0)
+        records = sheet.get_all_records()
+
+        process_count = 0
+        for row in records:
+            # Sheet sütun isimlerini kontrol edin!
+            name = row.get("Ad ve Soyad", "Aday")
+            url = row.get(
+                "Global Talent Programı için CV'nizi ingilizce olacak şekilde PDF formatında buraya yükleyebilirsiniz.")
+
+            if url and str(url).startswith("http"):
+                if process_cv(name, url):
+                    process_count += 1
+
+        return f"<h1>Başarılı</h1><p>{process_count} adet eski başvuru işlendi.</p>", 200
+    except Exception as e:
+        return f"<h1>Hata</h1><p>{str(e)}</p>", 500
 
 
 if __name__ == "__main__":
