@@ -137,10 +137,14 @@ def get_or_create_folder(folder_name, parent_id):
 # 🚀 ANA İŞLEME FONKSİYONU (CORE PROCESS)
 # ==========================================
 
+# ... (Üst kısımdaki importlar ve ayarlar aynı)
+
 def process_cv(candidate_name, pdf_url):
-    """Hem Webhook hem de Toplu İşlem bu fonksiyonu kullanır."""
     try:
-        print(f"İşlem başlıyor: {candidate_name}")
+        # DOSYA ADINI BELİRLE
+        target_filename = f"{candidate_name}_Standard.pdf"
+
+        print(f"İşlem kontrol ediliyor: {candidate_name}")
         headers = {"Authorization": f"Bearer {TYPEFORM_TOKEN}"}
         resp = requests.get(pdf_url, headers=headers)
 
@@ -155,17 +159,28 @@ def process_cv(candidate_name, pdf_url):
 
                 for cat in categories:
                     folder_id = get_or_create_folder(cat, ROOT_FOLDER_ID)
-                    media = MediaIoBaseUpload(io.BytesIO(new_pdf_bytes), mimetype='application/pdf')
-                    file_meta = {'name': f"{candidate_name}_Standard.pdf", 'parents': [folder_id]}
-                    drive_service.files().create(body=file_meta, media_body=media).execute()
 
-                print(f"✅ Başarılı: {candidate_name} -> {categories}")
+                    # 🔍 AYNI DOSYA VAR MI KONTROLÜ
+                    check_query = f"name = '{target_filename}' and '{folder_id}' in parents and trashed = false"
+                    existing_files = drive_service.files().list(q=check_query).execute().get('files', [])
+
+                    if existing_files:
+                        print(f"⚠️ Atlandı: {target_filename} zaten {cat} klasöründe var.")
+                        continue  # Eğer varsa yükleme yapma, bir sonraki kategoriye veya adaya geç
+
+                    # DOSYA YOKSA YÜKLE
+                    media = MediaIoBaseUpload(io.BytesIO(new_pdf_bytes), mimetype='application/pdf')
+                    file_meta = {'name': target_filename, 'parents': [folder_id]}
+                    drive_service.files().create(body=file_meta, media_body=media).execute()
+                    print(f"✅ Yüklendi: {candidate_name} -> {cat}")
+
                 return True
-        else:
-            print(f"❌ PDF İndirilemedi: {resp.status_code}")
     except Exception as e:
         print(f"❌ Hata: {str(e)}")
     return False
+
+
+# ... (Endpointler ve diğer kısımlar aynı)
 
 
 # ==========================================
@@ -180,10 +195,14 @@ def handle_typeform():
     pdf_url = ""
 
     for ans in answers:
+        # İsmi al
         if ans.get('type') == 'text' and candidate_name == "Aday":
             candidate_name = ans.get('text', 'Aday')
+
+        # 🔍 Dosya linkini al (Hangi sütundan/sorudan geldiği fark etmeksizin)
         if ans.get('type') == 'file_url':
             pdf_url = ans.get('file_url')
+            # Not: Eğer birden fazla dosya alanı varsa, bu döngü en sonuncuyu alır.
 
     if pdf_url:
         process_cv(candidate_name, pdf_url)
@@ -196,23 +215,42 @@ def process_old_submissions():
         gc = gspread.authorize(creds)
         spreadsheet_name = "İZMİR CV Form"
         sheet = gc.open(spreadsheet_name).get_worksheet(0)
-        records = sheet.get_all_records()
+
+        # Tüm satırları liste olarak alıyoruz
+        all_rows = sheet.get_all_values()
+        header = all_rows[0]
+
+        # "Ad ve Soyad" sütununu bulalım (Genelde sabittir)
+        try:
+            name_idx = header.index("Ad ve Soyad")
+        except ValueError:
+            name_idx = 0  # Bulamazsa ilk sütunu isim say
 
         process_count = 0
-        for row in records:
-            # Sheet sütun isimlerini kontrol edin!
-            name = row.get("Ad ve Soyad", "Aday")
-            url = row.get(
-                "Global Talent Programı için CV'nizi ingilizce olacak şekilde PDF formatında buraya yükleyebilirsiniz.")
 
-            if url and str(url).startswith("http"):
-                if process_cv(name, url):
+        # İlk satırı (başlık) atlayıp verileri dönüyoruz
+        for row in all_rows[1:]:
+            name = row[name_idx]
+            pdf_url = None
+
+            # 🔍 KRİTİK DEĞİŞİKLİK: Satırdaki TÜM hücreleri tara
+            for cell_value in row:
+                cell_str = str(cell_value).strip()
+                # Eğer hücre "http" ile başlıyorsa ve bir dosya linki gibiyse (Typeform linkleri)
+                if cell_str.startswith("http") and ("typeform.com" in cell_str or "storage" in cell_str):
+                    pdf_url = cell_str
+                    break  # Linki bulduğumuz an taramayı bırak
+
+            # Eğer bir link bulunduysa işlemi başlat
+            if pdf_url:
+                if process_cv(name, pdf_url):
                     process_count += 1
+            else:
+                print(f"⚠️ Atlandı: {name} için herhangi bir CV linki bulunamadı.")
 
-        return f"<h1>Başarılı</h1><p>{process_count} adet eski başvuru işlendi.</p>", 200
+        return f"<h1>İşlem Başarılı</h1><p>{process_count} adet başvuru tüm sütunlar taranarak işlendi.</p>", 200
     except Exception as e:
         return f"<h1>Hata</h1><p>{str(e)}</p>", 500
-
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
