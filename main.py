@@ -131,10 +131,31 @@ def process_cv(candidate_name, pdf_url):
 
 @app.route('/process_old_submissions', methods=['GET'])
 def process_old_submissions():
-    # gspread bağlantısı ve döngü...
-    # process_cv(name, url) çağrısı
-    return "İşlem tamamlandı", 200
+    try:
+        gc_sheet = gspread.authorize(creds)
+        spreadsheet_name = "İZMİR CV Form"
+        sheet = gc_sheet.open(spreadsheet_name).get_worksheet(0)
+        all_rows = sheet.get_all_values()
+        header = all_rows[0]
+        try:
+            name_idx = header.index("Ad ve Soyad")
+        except:
+            name_idx = 0
 
+        process_count = 0
+        for row in all_rows[1:]:
+            name = row[name_idx];
+            url = None
+            for cell in row:
+                if str(cell).startswith("http") and ("typeform.com" in str(cell) or "storage" in str(cell)):
+                    url = str(cell);
+                    break
+            if url:
+                if process_cv(name, url): process_count += 1
+
+        return f"<h1>İşlem Tamamlandı</h1><p>{process_count} adet başvuru işlendi.</p>", 200
+    except Exception as e:
+        return f"<h1>Hata</h1><p>{str(e)}</p>", 500
 
 # Webhook endpoint'ini de buraya ekleyin...
 
