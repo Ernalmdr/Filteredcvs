@@ -65,16 +65,22 @@ class StandardPDF(FPDF):
 
 
 def extract_and_categorize_with_gemini(text_content):
-    # KOTA ÇÖZÜMÜ: Daha yüksek limitli modele geçtik
-    model = genai.GenerativeModel('gemini-3-pro-preview')
-    prompt = f"Act as an HR expert. Extract CV data into JSON. Categories: {ALLOWED_CATEGORIES}. CV: {text_content}"
+    # ÇÖZÜM 1: Modeli en yüksek kotalı 'flash' modeline çekiyoruz
+    model = genai.GenerativeModel('gemini-2.5-flash')
+
+    prompt = f"Act as an HR expert. Extract CV data into JSON. CV: {text_content}"
+
     try:
+        # ÇÖZÜM 2: İstek göndermeden önce 1 saniye nefes payı
+        time.sleep(1)
         response = model.generate_content(prompt)
         return json.loads(response.text.replace("```json", "").replace("```", "").strip())
     except Exception as e:
+        if "429" in str(e):
+            print("⚠️ KOTA DOLDU: 60 saniye bekleniyor...")
+            time.sleep(60)  # Kota hatası alırsan botu 1 dakika uyut
         print(f"Gemini Hatası: {e}")
         return None
-
 
 def create_standard_pdf_bytes(json_data):
     pdf = StandardPDF()
@@ -186,8 +192,9 @@ def process_old_submissions():
             if pdf_url:
                 if process_cv(name, pdf_url):
                     process_count += 1
-                    time.sleep(5)  # KOTA DOSTU: Her işlem arası 5 saniye bekle
-
+                    # ÇÖZÜM 3: Her CV sonrası 5 saniye bekle (Dakikalık kotayı korur)
+                    print(f"☕ {name} işlendi, 5 saniye ara veriliyor...")
+                    time.sleep(5)
         return f"İşlem Tamamlandı. {process_count} adet başvuru işlendi.", 200
     except Exception as e:
         return f"Hata: {str(e)}", 500
