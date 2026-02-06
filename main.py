@@ -44,7 +44,7 @@ ALLOWED_CATEGORIES = ["Engineering", "Marketing", "HR", "Finance", "Sales", "IT"
 
 def extract_and_categorize_with_gemini(text_content):
     """CV verisini çıkarır ve kategorileri belirler."""
-    model = genai.GenerativeModel('gemini-1.5-flash')
+    model = genai.GenerativeModel('gemini-3-flash-preview')
     categories_str = ", ".join(ALLOWED_CATEGORIES)
 
     prompt = f"""
