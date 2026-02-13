@@ -1,5 +1,7 @@
 import time
-
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaIoBaseUpload
+import io
 import streamlit as st
 import pandas as pd
 import gspread
@@ -11,6 +13,8 @@ import os
 import json
 import google.generativeai as genai
 from fpdf import FPDF
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 # ==========================================
 # ⚙️ AYARLAR
@@ -18,6 +22,7 @@ from fpdf import FPDF
 
 CREDENTIALS_FILE = 'credentials.json'
 SHEET_NAME = 'İZMİR CV Form'
+ALLOWED_CATEGORIES = ["Engineering", "Marketing", "HR", "Finance", "Sales", "IT", "Design"]
 
 try:
     TYPEFORM_ACCESS_TOKEN = st.secrets["general"]["typeform_token"]
@@ -38,6 +43,38 @@ COLUMN_NAME = "Ad ve Soyad"
 COLUMN_DEPARTMENT = "Hangi alanda staja başvurmak istiyorsunuz ?"
 
 
+def get_drive_service():
+    scopes = ["https://www.googleapis.com/auth/drive"]
+    if "gcp_service_account" in st.secrets:
+        creds = Credentials.from_service_account_info(st.secrets["gcp_service_account"], scopes=scopes)
+    else:
+        creds = Credentials.from_service_account_file(CREDENTIALS_FILE, scopes=scopes)
+    return build('drive', 'v3', credentials=creds)
+
+
+def get_or_create_drive_folder(service, folder_name, parent_id):
+    query = f"name = '{folder_name}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false and '{parent_id}' in parents"
+    results = service.files().list(q=query, supportsAllDrives=True, includeItemsFromAllDrives=True).execute().get(
+        'files', [])
+    if results: return results[0]['id']
+
+    meta = {'name': folder_name, 'mimeType': 'application/vnd.google-apps.folder', 'parents': [parent_id]}
+    folder = service.files().create(body=meta, fields='id', supportsAllDrives=True).execute()
+    return folder.get('id')
+
+
+def upload_to_drive(service, file_bytes, file_name, categories):
+    root_id = st.secrets["general"].get("root_folder_id")
+    # Eğer Gemini kategori bulamazsa "Others" kullan
+    final_categories = categories if categories else ["Others"]
+
+    for cat in final_categories:
+        folder_id = get_or_create_drive_folder(service, cat, root_id)
+        media = MediaIoBaseUpload(io.BytesIO(file_bytes), mimetype='application/pdf')
+        file_meta = {'name': file_name, 'parents': [folder_id]}
+        service.files().create(body=file_meta, media_body=media, supportsAllDrives=True).execute()
+    return True
+
 # ==========================================
 # 🧠 YAPAY ZEKA & PDF OLUŞTURUCU
 # ==========================================
@@ -49,29 +86,41 @@ def extract_data_with_gemini(text_content):
     # 'flash' modeli en hızlısıdır.
     model = genai.GenerativeModel('gemini-3-flash-preview')
 
-    # Prompt'u biraz kısalttık ki AI daha hızlı okusun
+    # ALLOWED_CATEGORIES ve text_content değişkenlerinin tanımlı olduğunu varsayıyorum.
+
     prompt = f"""
-    Act as an HR expert. Extract data from this CV into the JSON format below.
-    Return ONLY JSON. No markdown formatting. If missing, leave empty.
+        Act as a professional HR expert and Resume Writer. 
+        Your goal is to extract data from the provided CV and ENHANCE it to make the candidate stand out.
 
-    JSON Schema:
-    {{
-        "name": "Full Name",
-        "title": "Title",
-        "location": "City",
-        "summary": "Professional summary, objective, or 'about me' section text",
-        "education": [{{ "degree": "", "school": "", "year": "" }}],
-        "experience": [{{ "role": "", "company": "", "description": "Brief summary" }}],
-        "projects": [{{ "name": "", "tech": "", "details": "Brief summary" }}],
-        "certificates": [{{ "name": "Certificate Name", "issuer": "Issuing Organization", "year": "Year" }}],
-        "skills": {{ "tech": "List of skills" }},
-        "spoken_languages": "List",
-        "interests": "List"
-    }}
+        STRICT RULES FOR ENHANCEMENT:
+        1. PROFESSIONAL TONE: Use strong action verbs (e.g., "Spearheaded", "Optimized", "Engineered").
+        2. QUANTIFIABLE IMPACT: Where possible, transform descriptions into achievement-based statements using numerical data (percentages, time saved, budget managed). If specific numbers aren't present, use placeholders or professional phrasing that implies scale.
+        3. SUMMARY: Rewrite the 'summary' to be a powerful elevator pitch.
+        4. EXPERIENCE: Rewrite job descriptions to focus on results rather than just duties.
 
-    CV TEXT:
-    {text_content}
-    """
+        Pick one or more categories for 'suggested_categories' ONLY from this list: {ALLOWED_CATEGORIES}.
+        Return ONLY JSON. No markdown formatting. If missing, leave empty. 
+
+        JSON Schema:
+        {{
+            "name": "Full Name",
+            "suggested_categories": ["Category from the list"],
+            "title": "Professional Title",
+            "location": "City",
+            "summary": "Enhanced professional summary with a focus on value proposition",
+            "education": [{{ "degree": "", "school": "", "year": "" }}],
+            "experience": [{{ 
+                "role": "", 
+                "company": "", 
+                "description": "Enhanced description with numerical achievements and action verbs" 
+            }}],
+            "skills": {{ "tech": "List of technical skills" }},
+            "spoken_languages": "List"
+        }}
+
+        CV TEXT:
+        {text_content}
+        """
 
     try:
         response = model.generate_content(prompt)
@@ -235,10 +284,66 @@ def create_standardized_pdf(json_data):
         pdf.section_title('INTERESTS')
         pdf.section_body(json_data['interests'])
 
-    return pdf.output(dest='S').encode('latin-1', 'replace')
+    return pdf.output()
 # ==========================================
 # 🛠️ YARDIMCI FONKSİYONLAR
 # ==========================================
+def process_and_upload_single(name, row, service, cv_cols, silent=False):
+    token = str(row.get(COLUMN_TOKEN_ID, "NoToken"))
+    if token in get_processed_tokens():
+        if not silent: st.warning(f"⚠️ {name} zaten işlenmiş.")
+        return False
+
+    pdf_url = ""
+    for col in cv_cols:
+        val = str(row.get(col, "")).strip()
+        if "http" in val:
+            pdf_url = val
+            break
+
+    if not pdf_url:
+        if not silent: st.error(f"{name} için CV Linki bulunamadı.")
+        return False
+
+    # --- YENİLENEN KISIM: Bağlantı Yönetimi ---
+    session = requests.Session()
+    # 3 kez deneme yap, hatalar arasında bekleme süresini artır
+    retries = Retry(total=3, backoff_factor=1, status_forcelist=[500, 502, 503, 504])
+    session.mount('https://', HTTPAdapter(max_retries=retries))
+
+    headers = {"Authorization": f"Bearer {st.secrets['general']['typeform_token']}"}
+
+    try:
+        # Zaman aşımı (timeout) değerini koruyoruz
+        resp = session.get(pdf_url, headers=headers, timeout=60)
+        resp.raise_for_status()  # HTTP hatalarını yakalar (404, 401 vb.)
+
+        if resp.status_code == 200:
+            doc = fitz.open(stream=resp.content, filetype="pdf")
+            full_text = "".join([page.get_text() for page in doc])
+            cv_json = extract_data_with_gemini(full_text)
+
+            if cv_json:
+                new_pdf_bytes = create_standardized_pdf(cv_json)
+                cats = cv_json.get("suggested_categories", ["Others"])
+                if not isinstance(cats, list): cats = [cats]
+
+                success = upload_to_drive(service, new_pdf_bytes, f"{name}_Standart.pdf", cats)
+                if success:
+                    save_token(token)
+                    if not silent:
+                        st.success(f"✅ {name} Drive'a yüklendi!")
+                    return True
+
+    except requests.exceptions.ConnectionError:
+        if not silent: st.error(
+            f"🌐 Bağlantı hatası: İnternetinizi kontrol edin veya DNS kaynaklı bir sorun var ({name}).")
+    except requests.exceptions.Timeout:
+        if not silent: st.error(f"⏳ Zaman aşımı: Typeform sunucusu yanıt vermedi ({name}).")
+    except Exception as e:
+        if not silent: st.error(f"❌ Beklenmedik bir hata oluştu ({name}): {e}")
+
+    return False
 def sanitize_text(text):
     """Türkçe karakterleri İngilizce karşılıklarına çevirir (Font yoksa kullanılır)."""
     if not isinstance(text, str):
@@ -371,67 +476,47 @@ if not df.empty:
 
     # --- İŞLEM PANELİ ---
     st.markdown("---")
-    st.subheader("📄 Standart Formatlı CV Oluştur")
+    st.subheader("📄 Standart Formatlı CV & Drive Entegrasyonu")
 
-    c1, c2 = st.columns([1, 2])
+    c1, c2, c3 = st.columns([1, 1, 1])
+
     with c1:
         sel_name = st.selectbox("Aday Seç:", filtered_df[name_col].tolist()) if name_col else None
 
+    # Drive servisini hazırlayalım
+    drive_service = get_drive_service()
+
     with c2:
-        if sel_name and st.button("Tek Tipe Çevir ve İndir"):
+        st.write("**Bireysel İşlem**")
+        if sel_name and st.button("Seçiliyi Drive'a Gönder"):
             row = filtered_df[filtered_df[name_col] == sel_name].iloc[0]
-            token = str(row.get(COLUMN_TOKEN_ID, "NoToken"))
+            # (Burada PDF oluşturma ve Drive'a yükleme mantığı çalışacak)
+            process_and_upload_single(sel_name, row, drive_service, all_cv_cols)
 
-            pdf_url = ""
-            for col in all_cv_cols:
-                val = str(row.get(col, "")).strip()
-                if "http" in val:
-                    pdf_url = val
-                    break
+    with c3:
+        st.write("**Toplu İşlem**")
+        if st.button(f"Filtreli {len(filtered_df)} Kişiyi Drive'a Gönder"):
+            # Güncel işlenmiş token listesini al
+            processed_tokens = get_processed_tokens()
 
-            if not pdf_url:
-                st.error("CV Linki bulunamadı.")
+            # Sadece henüz işlenmemiş olanları filtrele
+            to_process_df = filtered_df[~filtered_df[COLUMN_TOKEN_ID].isin(processed_tokens)]
+
+            if to_process_df.empty:
+                st.info("Seçili listedeki tüm adaylar zaten daha önce gönderilmiş.")
             else:
-                with st.spinner("1. PDF İndiriliyor..."):
-                    headers = {"Authorization": f"Bearer {TYPEFORM_ACCESS_TOKEN}"}
-                    resp = None
-                    for attempt in range(3):  # 3 kere deneme hakkı veriyoruz
-                        try:
-                            # timeout=60 diyerek "hemen pes etme, 60 saniye bekle" diyoruz
-                            resp = requests.get(pdf_url, headers=headers, timeout=60)
+                progress_bar = st.progress(0)
+                status_text = st.empty()
+                total = len(to_process_df)
 
-                            if resp.status_code == 200:
-                                break  # Başarılı olduysa döngüden çık
-                        except requests.exceptions.RequestException:
-                            time.sleep(2)  # Hata olursa 2 saniye dinlenip tekrar dene
+                for i, (idx, row) in enumerate(to_process_df.iterrows()):
+                    c_name = row[name_col]
+                    status_text.text(f"İşleniyor ({i + 1}/{total}): {c_name}")
 
-                    # Eğer 3 denemede de olmadıysa hata ver
-                    if resp is None or resp.status_code != 200:
-                        st.error("İnternet bağlantısı çok yavaş veya kesildi. 3 kez denendi ama PDF indirilemedi.")
-                        st.stop()
-                    if resp.status_code == 200:
-                        # 1. Metni Çıkar
-                        with st.spinner("2. Yapay Zeka CV'yi okuyor..."):
-                            doc = fitz.open(stream=resp.content, filetype="pdf")
-                            full_text = ""
-                            for page in doc: full_text += page.get_text()
+                    process_and_upload_single(c_name, row, drive_service, all_cv_cols, silent=True)
 
-                            # 2. Gemini ile JSON'a çevir
-                            cv_json = extract_data_with_gemini(full_text)
+                    progress_bar.progress((i + 1) / total)
+                    time.sleep(1)  # Kota koruması için kısa mola
 
-                            if cv_json:
-                                # 3. Yeni PDF'i bas
-                                with st.spinner("3. Standart Format Oluşturuluyor..."):
-                                    new_pdf_bytes = create_standardized_pdf(cv_json)
-
-                                    st.success("✅ Dönüştürme Başarılı!")
-                                    st.download_button(
-                                        label="📥 Standart CV'yi İndir",
-                                        data=new_pdf_bytes,
-                                        file_name=f"{sel_name}_Standart.pdf",
-                                        mime="application/pdf"
-                                    )
-                    else:
-                        st.error("PDF indirilemedi.")
-
-
+                st.success(f"✅ Yeni {total} aday Drive'a yüklendi!")
+                status_text.empty()
