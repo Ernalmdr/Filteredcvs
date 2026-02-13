@@ -15,6 +15,7 @@ import google.generativeai as genai
 from fpdf import FPDF
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+import PIL.Image  # Görsel işleme için
 
 # ==========================================
 # ⚙️ AYARLAR
@@ -23,6 +24,12 @@ from urllib3.util.retry import Retry
 CREDENTIALS_FILE = 'credentials.json'
 SHEET_NAME = 'İZMİR CV Form'
 ALLOWED_CATEGORIES = ["Engineering", "Marketing", "HR", "Finance", "Sales", "IT", "Design"]
+
+if "processing" not in st.session_state:
+    st.session_state.processing = False
+
+def set_processing(state):
+    st.session_state.processing = state
 
 try:
     TYPEFORM_ACCESS_TOKEN = st.secrets["general"]["typeform_token"]
@@ -53,23 +60,62 @@ def get_drive_service():
 
 
 def get_or_create_drive_folder(service, folder_name, parent_id):
-    query = f"name = '{folder_name}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false and '{parent_id}' in parents"
-    results = service.files().list(q=query, supportsAllDrives=True, includeItemsFromAllDrives=True).execute().get(
-        'files', [])
-    if results: return results[0]['id']
+    # Klasör ismindeki gereksiz boşlukları temizle
+    folder_name = folder_name.strip()
 
-    meta = {'name': folder_name, 'mimeType': 'application/vnd.google-apps.folder', 'parents': [parent_id]}
-    folder = service.files().create(body=meta, fields='id', supportsAllDrives=True).execute()
-    return folder.get('id')
+    # Mevcut klasörü aramak için daha sağlam bir sorgu
+    query = (f"name = '{folder_name}' and "
+             f"mimeType = 'application/vnd.google-apps.folder' and "
+             f"trashed = false and "
+             f"'{parent_id}' in parents")
+
+    try:
+        results = service.files().list(
+            q=query,
+            spaces='drive',
+            fields='files(id, name)',
+            supportsAllDrives=True,
+            includeItemsFromAllDrives=True
+        ).execute().get('files', [])
+
+        if results:
+            # Eğer birden fazla bulunduysa, ilkini (en eskisini) döndür
+            return results[0]['id']
+
+        # Bulunamadıysa yeni oluştur
+        meta = {
+            'name': folder_name,
+            'mimeType': 'application/vnd.google-apps.folder',
+            'parents': [parent_id]
+        }
+        folder = service.files().create(
+            body=meta,
+            fields='id',
+            supportsAllDrives=True
+        ).execute()
+
+        return folder.get('id')
+
+    except Exception as e:
+        st.error(f"Klasör işlemi sırasında hata: {e}")
+        return parent_id  # Hata olursa ana klasöre yükle
 
 
 def upload_to_drive(service, file_bytes, file_name, categories):
     root_id = st.secrets["general"].get("root_folder_id")
-    # Eğer Gemini kategori bulamazsa "Others" kullan
     final_categories = categories if categories else ["Others"]
 
     for cat in final_categories:
         folder_id = get_or_create_drive_folder(service, cat, root_id)
+
+        # --- YENİ: Dosya Var mı Kontrolü ---
+        check_query = f"name = '{file_name}' and '{folder_id}' in parents and trashed = false"
+        existing_files = service.files().list(q=check_query, supportsAllDrives=True).execute().get('files', [])
+
+        if existing_files:
+            # Dosya zaten varsa üstüne yazmak yerine atla veya güncelle
+            continue
+
         media = MediaIoBaseUpload(io.BytesIO(file_bytes), mimetype='application/pdf')
         file_meta = {'name': file_name, 'parents': [folder_id]}
         service.files().create(body=file_meta, media_body=media, supportsAllDrives=True).execute()
@@ -312,29 +358,70 @@ def process_and_upload_single(name, row, service, cv_cols, silent=False):
     session.mount('https://', HTTPAdapter(max_retries=retries))
 
     headers = {"Authorization": f"Bearer {st.secrets['general']['typeform_token']}"}
-
     try:
-        # Zaman aşımı (timeout) değerini koruyoruz
-        resp = session.get(pdf_url, headers=headers, timeout=60)
-        resp.raise_for_status()  # HTTP hatalarını yakalar (404, 401 vb.)
-
+        resp = requests.get(pdf_url, headers=headers, timeout=60)
         if resp.status_code == 200:
             doc = fitz.open(stream=resp.content, filetype="pdf")
             full_text = "".join([page.get_text() for page in doc])
-            cv_json = extract_data_with_gemini(full_text)
 
+            # --- GELİŞMİŞ VERİ ÇIKARMA MANTIĞI ---
+            cv_json = None
+
+            # Eğer metin varsa standart metin analizi yap
+            if len(full_text.strip()) > 50:
+                cv_json = extract_data_with_gemini(full_text)
+
+            # Eğer metin yoksa veya AI başarısız olduysa GÖRSEL ANALİZİ (Vision) yap
+            if not cv_json or len(full_text.strip()) <= 50:
+                if not silent: st.info(f"🔍 {name} için metin okunamadı, görsel taraması (OCR) başlatılıyor...")
+
+                # İlk sayfayı yüksek çözünürlüklü resme dönüştür
+                page = doc[0]
+                pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))  # Çözünürlüğü 2 kat artır (Daha iyi okuma için)
+                img = PIL.Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+
+                #
+                vision_model = genai.GenerativeModel('gemini-3-flash-preview')
+
+                prompt = f"""
+                    Analyze this CV image. Extract the information and format it as JSON.
+                    Categories must be from: {ALLOWED_CATEGORIES}
+
+                    JSON Schema:
+                    {{
+                        "name": "Full Name",
+                        "suggested_categories": ["Category"],
+                        "title": "Title",
+                        "location": "City",
+                        "summary": "Professional summary",
+                        "education": [],
+                        "experience": [],
+                        "skills": {{ "tech": "" }},
+                        "spoken_languages": ""
+                    }}
+                    """
+
+                response = vision_model.generate_content([prompt, img])
+
+                # JSON temizleme ve yükleme
+                try:
+                    json_str = response.text.replace("```json", "").replace("```", "").strip()
+                    cv_json = json.loads(json_str)
+                except:
+                    cv_json = None
+
+            # --- YÜKLEME ADIMI ---
             if cv_json:
                 new_pdf_bytes = create_standardized_pdf(cv_json)
                 cats = cv_json.get("suggested_categories", ["Others"])
-                if not isinstance(cats, list): cats = [cats]
-
                 success = upload_to_drive(service, new_pdf_bytes, f"{name}_Standart.pdf", cats)
                 if success:
                     save_token(token)
-                    if not silent:
-                        st.success(f"✅ {name} Drive'a yüklendi!")
+                    if not silent: st.success(f"✅ {name} (Vision desteğiyle) yüklendi!")
                     return True
 
+    except Exception as e:
+        if not silent: st.error(f"❌ {name} işlenirken hata: {e}")
     except requests.exceptions.ConnectionError:
         if not silent: st.error(
             f"🌐 Bağlantı hatası: İnternetinizi kontrol edin veya DNS kaynaklı bir sorun var ({name}).")
@@ -488,11 +575,22 @@ if not df.empty:
 
     with c2:
         st.write("**Bireysel İşlem**")
-        if sel_name and st.button("Seçiliyi Drive'a Gönder"):
-            row = filtered_df[filtered_df[name_col] == sel_name].iloc[0]
-            # (Burada PDF oluşturma ve Drive'a yükleme mantığı çalışacak)
-            process_and_upload_single(sel_name, row, drive_service, all_cv_cols)
+        # İşlem sürüyorsa butonu disabled yap
+        btn_single = st.button(
+            "Seçiliyi Drive'a Gönder",
+            disabled=st.session_state.processing,
+            on_click=set_processing,
+            args=(True,)
+        )
 
+        if btn_single:
+            try:
+                row = filtered_df[filtered_df[name_col] == sel_name].iloc[0]
+                process_and_upload_single(sel_name, row, drive_service, all_cv_cols)
+            finally:
+                # İşlem bittiğinde (hata alsa bile) butonu tekrar aç
+                st.session_state.processing = False
+                st.rerun()
     with c3:
         st.write("**Toplu İşlem**")
         if st.button(f"Filtreli {len(filtered_df)} Kişiyi Drive'a Gönder"):
