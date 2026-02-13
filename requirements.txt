@@ -1,3 +1,7 @@
+fitz
+protobuf
+urllib3
+pillow
 streamlit
 pandas
 gspread
