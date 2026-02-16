@@ -23,7 +23,7 @@ import PIL.Image  # Görsel işleme için
 
 CREDENTIALS_FILE = 'credentials.json'
 SHEET_NAME = 'İZMİR CV Form'
-ALLOWED_CATEGORIES = ["Engineering", "Marketing", "HR", "Finance", "Sales", "IT", "Design"]
+ALLOWED_CATEGORIES = ["Teacher","Engineering", "Marketing", "HR", "Finance", "Sales", "IT", "Design"]
 
 if "processing" not in st.session_state:
     st.session_state.processing = False
@@ -411,14 +411,34 @@ def process_and_upload_single(name, row, service, cv_cols, silent=False):
                     cv_json = None
 
             # --- YÜKLEME ADIMI ---
-            if cv_json:
-                new_pdf_bytes = create_standardized_pdf(cv_json)
-                cats = cv_json.get("suggested_categories", ["Others"])
-                success = upload_to_drive(service, new_pdf_bytes, f"{name}_Standart.pdf", cats)
-                if success:
-                    save_token(token)
-                    if not silent: st.success(f"✅ {name} (Vision desteğiyle) yüklendi!")
-                    return True
+                    # --- YÜKLEME ADIMI ---
+                    if cv_json:
+                        new_pdf_bytes = create_standardized_pdf(cv_json)
+                        cats = cv_json.get("suggested_categories", ["Others"])
+
+                        # 1. Standart CV Yükleme (Mevcut İşlem)
+                        success = upload_to_drive(service, new_pdf_bytes, f"{name}_Standart.pdf", cats)
+
+                        # 👇 YENİ: Orijinal CV'yi Havuzda Kategorilerine Ayırarak Yükleme
+                        pool_folder_id = st.secrets["general"].get("pool_folder_id")
+                        if pool_folder_id:
+                            for cat in cats:
+                                # Havuz ID'sinin içinde kategori klasörü bul veya oluştur
+                                cat_folder_id = get_or_create_drive_folder(service, cat, pool_folder_id)
+                                try:
+                                    orig_media = MediaIoBaseUpload(io.BytesIO(resp.content), mimetype='application/pdf')
+                                    orig_meta = {'name': f"{name}_Orijinal.pdf", 'parents': [cat_folder_id]}
+                                    service.files().create(body=orig_meta, media_body=orig_media,
+                                                           supportsAllDrives=True).execute()
+                                except Exception as e:
+                                    if not silent: st.warning(
+                                        f"⚠️ {name} orijinal CV '{cat}' klasörüne eklenirken hata: {e}")
+                        # 👆 YENİ EKLENEN KISIM BİTİŞİ
+
+                        if success:
+                            save_token(token)
+                            if not silent: st.success(f"✅ {name} yüklendi (Orijinal ve Standart)!")
+                            return True
 
     except Exception as e:
         if not silent: st.error(f"❌ {name} işlenirken hata: {e}")
@@ -618,3 +638,72 @@ if not df.empty:
 
                 st.success(f"✅ Yeni {total} aday Drive'a yüklendi!")
                 status_text.empty()
+
+    st.markdown("---")
+    st.subheader("🛠️ Bakım ve Geri Dönük İşlemler")
+
+    if st.button("Geçmiş Orijinal CV'leri Havuza Yükle (Eksikleri Tamamla)"):
+        pool_folder_id = st.secrets["general"].get("pool_folder_id")
+
+        if not pool_folder_id:
+            st.error("⚠️ Lütfen secrets.toml dosyasına 'pool_folder_id' ekleyin.")
+        else:
+            processed_tokens = get_processed_tokens()
+            # Sadece DAHA ÖNCE İŞLENMİŞ olanları buluyoruz
+            old_df = filtered_df[filtered_df[COLUMN_TOKEN_ID].isin(processed_tokens)]
+
+            if old_df.empty:
+                st.info("İşlenmiş geçmiş kayıt bulunamadı.")
+            else:
+                progress_bar = st.progress(0)
+                status_text = st.empty()
+                total = len(old_df)
+                uploaded_count = 0
+
+                for i, (idx, row) in enumerate(old_df.iterrows()):
+                    c_name = row[name_col]
+                    status_text.text(f"Kontrol ediliyor ({i + 1}/{total}): {c_name}")
+
+                    # Orijinal dosyanın Drive havuzunda zaten olup olmadığını kontrol et
+                    check_query = f"name = '{c_name}_Orijinal.pdf' and trashed = false"
+                    existing = drive_service.files().list(q=check_query, supportsAllDrives=True).execute().get('files', [])
+
+                    if not existing:
+                        # Dosya havuzda yok, demek ki indirmemiz lazım
+                        pdf_url = ""
+                        for col in all_cv_cols:
+                            val = str(row.get(col, "")).strip()
+                            if "http" in val:
+                                pdf_url = val
+                                break
+
+                        if pdf_url:
+                            try:
+                                headers = {"Authorization": f"Bearer {st.secrets['general']['typeform_token']}"}
+                                resp = requests.get(pdf_url, headers=headers, timeout=60)
+
+                                if resp.status_code == 200:
+                                    # Kategoriyi bulmak için metni oku ve Gemini'ye sor
+                                    doc = fitz.open(stream=resp.content, filetype="pdf")
+                                    full_text = "".join([page.get_text() for page in doc])
+
+                                    cv_json = extract_data_with_gemini(full_text)
+                                    cats = cv_json.get("suggested_categories", ["Others"]) if cv_json else ["Others"]
+
+                                    for cat in cats:
+                                        cat_folder_id = get_or_create_drive_folder(drive_service, cat, pool_folder_id)
+                                        orig_media = MediaIoBaseUpload(io.BytesIO(resp.content), mimetype='application/pdf')
+                                        orig_meta = {'name': f"{c_name}_Orijinal.pdf", 'parents': [cat_folder_id]}
+                                        drive_service.files().create(body=orig_meta, media_body=orig_media,
+                                                                     supportsAllDrives=True).execute()
+
+                                    uploaded_count += 1
+                                    time.sleep(2)  # Gemini kotasını korumak için mola
+                            except Exception as e:
+                                st.warning(f"⚠️ {c_name} işlenirken hata: {e}")
+
+                    progress_bar.progress((i + 1) / total)
+
+                status_text.empty()
+                st.success(
+                    f"✅ İşlem tamamlandı! Toplam {uploaded_count} eksik orijinal CV havuza kategorize edilerek eklendi.")
