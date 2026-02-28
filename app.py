@@ -625,7 +625,7 @@ if not df.empty:
                 # İşlem bittiğinde (hata alsa bile) butonu tekrar aç
                 st.session_state.processing = False
                 st.rerun()
-   with c3:
+    with c3:
         st.write("**Toplu İşlem**")
         if st.button(f"Filtreli {len(filtered_df)} Kişiyi Drive'a Gönder"):
             
