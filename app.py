@@ -361,29 +361,25 @@ def process_and_upload_single(name, row, service, cv_cols, silent=False):
     headers = {"Authorization": f"Bearer {st.secrets['general']['typeform_token']}"}
     try:
         resp = requests.get(pdf_url, headers=headers, timeout=60)
+        
+        # 1. KONTROL: Dosya Typeform'dan başarıyla indirildi mi?
         if resp.status_code == 200:
             doc = fitz.open(stream=resp.content, filetype="pdf")
             full_text = "".join([page.get_text() for page in doc])
 
-            # --- GELİŞMİŞ VERİ ÇIKARMA MANTIĞI ---
             cv_json = None
 
-            # Eğer metin varsa standart metin analizi yap
             if len(full_text.strip()) > 50:
                 cv_json = extract_data_with_gemini(full_text)
 
-            # Eğer metin yoksa veya AI başarısız olduysa GÖRSEL ANALİZİ (Vision) yap
             if not cv_json or len(full_text.strip()) <= 50:
                 if not silent: st.info(f"🔍 {name} için metin okunamadı, görsel taraması (OCR) başlatılıyor...")
-
-                # İlk sayfayı yüksek çözünürlüklü resme dönüştür
                 page = doc[0]
-                pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))  # Çözünürlüğü 2 kat artır (Daha iyi okuma için)
+                pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))
                 img = PIL.Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
 
-                #
-                vision_model = genai.GenerativeModel('gemini-3-flash-preview')
-
+                vision_model = genai.GenerativeModel('gemini-1.5-flash') # Modeli güncelledik (daha kararlı)
+                
                 prompt = f"""
                     Analyze this CV image. Extract the information and format it as JSON.
                     Categories must be from: {ALLOWED_CATEGORIES}
@@ -401,45 +397,43 @@ def process_and_upload_single(name, row, service, cv_cols, silent=False):
                         "spoken_languages": ""
                     }}
                     """
-
                 response = vision_model.generate_content([prompt, img])
-
-                # JSON temizleme ve yükleme
+                
                 try:
                     json_str = response.text.replace("```json", "").replace("```", "").strip()
                     cv_json = json.loads(json_str)
                 except:
                     cv_json = None
 
-            # --- YÜKLEME ADIMI ---
-                    # --- YÜKLEME ADIMI ---
-                    if cv_json:
-                        new_pdf_bytes = create_standardized_pdf(cv_json)
-                        cats = cv_json.get("suggested_categories", ["Others"])
+            # 2. KONTROL: Yapay Zeka JSON üretebildi mi?
+            if cv_json:
+                new_pdf_bytes = create_standardized_pdf(cv_json)
+                cats = cv_json.get("suggested_categories", ["Others"])
 
-                        # 1. Standart CV Yükleme (Mevcut İşlem)
-                        success = upload_to_drive(service, new_pdf_bytes, f"{name}_Standart.pdf", cats)
+                success = upload_to_drive(service, new_pdf_bytes, f"{name}_Standart.pdf", cats)
 
-                        # 👇 YENİ: Orijinal CV'yi Havuzda Kategorilerine Ayırarak Yükleme
-                        pool_folder_id = st.secrets["general"].get("pool_folder_id")
-                        if pool_folder_id:
-                            for cat in cats:
-                                # Havuz ID'sinin içinde kategori klasörü bul veya oluştur
-                                cat_folder_id = get_or_create_drive_folder(service, cat, pool_folder_id)
-                                try:
-                                    orig_media = MediaIoBaseUpload(io.BytesIO(resp.content), mimetype='application/pdf')
-                                    orig_meta = {'name': f"{name}_Orijinal.pdf", 'parents': [cat_folder_id]}
-                                    service.files().create(body=orig_meta, media_body=orig_media,
-                                                           supportsAllDrives=True).execute()
-                                except Exception as e:
-                                    if not silent: st.warning(
-                                        f"⚠️ {name} orijinal CV '{cat}' klasörüne eklenirken hata: {e}")
-                        # 👆 YENİ EKLENEN KISIM BİTİŞİ
+                pool_folder_id = st.secrets["general"].get("pool_folder_id")
+                if pool_folder_id:
+                    for cat in cats:
+                        cat_folder_id = get_or_create_drive_folder(service, cat, pool_folder_id)
+                        try:
+                            orig_media = MediaIoBaseUpload(io.BytesIO(resp.content), mimetype='application/pdf')
+                            orig_meta = {'name': f"{name}_Orijinal.pdf", 'parents': [cat_folder_id]}
+                            service.files().create(body=orig_meta, media_body=orig_media, supportsAllDrives=True).execute()
+                        except Exception as e:
+                            if not silent: st.warning(f"⚠️ {name} orijinal CV eklenirken hata: {e}")
 
-                        if success:
-                            mark_as_processed_in_sheet(token) 
-                            if not silent: st.success(f"✅ {name} yüklendi (Orijinal ve Standart)!")
-                            return True
+                # 3. KONTROL: Drive'a başarıyla yüklendi mi?
+                if success:
+                    mark_as_processed_in_sheet(token) # Sayfayı güncelleyen yeni fonksiyonumuz
+                    if not silent: st.success(f"✅ {name} yüklendi (Orijinal ve Standart)!")
+                    return True
+                else:
+                    if not silent: st.error("❌ Dosyalar Drive'a yüklenemedi.")
+            else:
+                if not silent: st.error("❌ Yapay zeka bu CV'den veri çıkaramadı. (JSON boş döndü)")
+        else:
+            if not silent: st.error(f"❌ Typeform'dan PDF indirilemedi! Hata Kodu: {resp.status_code}")
 
     except Exception as e:
         if not silent: st.error(f"❌ {name} işlenirken hata: {e}")
