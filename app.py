@@ -337,9 +337,9 @@ def create_standardized_pdf(json_data):
 # ==========================================
 def process_and_upload_single(name, row, service, cv_cols, silent=False):
     token = str(row.get(COLUMN_TOKEN_ID, "NoToken"))
-  if str(row.get(COLUMN_IS_PROCESSED, "")).strip().lower() == "yes":
-        if not silent: st.warning(f"⚠️ {name} zaten işlenmiş.")
-        return False
+    if str(row.get(COLUMN_IS_PROCESSED, "")).strip().lower() == "yes":
+          if not silent: st.warning(f"⚠️ {name} zaten işlenmiş.")
+          return False
 
     pdf_url = ""
     for col in cv_cols:
