@@ -48,6 +48,7 @@ COLUMN_PDF_URL_BASE = "Global Talent Programı için CV'nizi ingilizce olacak ş
 COLUMN_TOKEN_ID = "Token"
 COLUMN_NAME = "Ad ve Soyad"
 COLUMN_DEPARTMENT = "Hangi alanda staja başvurmak istiyorsunuz ?"
+COLUMN_IS_PROCESSED = "IsProcessed"
 
 
 def get_drive_service():
@@ -336,7 +337,7 @@ def create_standardized_pdf(json_data):
 # ==========================================
 def process_and_upload_single(name, row, service, cv_cols, silent=False):
     token = str(row.get(COLUMN_TOKEN_ID, "NoToken"))
-    if token in get_processed_tokens():
+  if str(row.get(COLUMN_IS_PROCESSED, "")).strip().lower() == "yes":
         if not silent: st.warning(f"⚠️ {name} zaten işlenmiş.")
         return False
 
@@ -436,7 +437,7 @@ def process_and_upload_single(name, row, service, cv_cols, silent=False):
                         # 👆 YENİ EKLENEN KISIM BİTİŞİ
 
                         if success:
-                            save_token(token)
+                            mark_as_processed_in_sheet(token) 
                             if not silent: st.success(f"✅ {name} yüklendi (Orijinal ve Standart)!")
                             return True
 
@@ -532,14 +533,27 @@ def load_data():
                 st.error(f"Google Sheets Bağlantı Hatası (3 kez denendi): {e}")
                 return pd.DataFrame()
 
-def get_processed_tokens():
-    if os.path.exists("processed_tokens.txt"):
-        with open("processed_tokens.txt", "r") as f: return f.read().splitlines()
-    return []
-
-
-def save_token(token):
-    with open("processed_tokens.txt", "a") as f: f.write(f"{token}\n")
+def mark_as_processed_in_sheet(token):
+    try:
+        scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
+        if "gcp_service_account" in st.secrets:
+            creds = Credentials.from_service_account_info(st.secrets["gcp_service_account"], scopes=scopes)
+        else:
+            creds = Credentials.from_service_account_file(CREDENTIALS_FILE, scopes=scopes)
+        
+        client = gspread.authorize(creds)
+        sheet = client.open(SHEET_NAME).worksheet("İZMİR CV Form")
+        
+        # Sayfadaki Token'ı arayıp bul (Token'lar eşsizdir)
+        cell = sheet.find(token)
+        if cell:
+            header = sheet.row_values(1)
+            # Eğer başlıklar arasında "IsProcessed" varsa o hücreyi "Yes" yap
+            if COLUMN_IS_PROCESSED in header:
+                col_idx = header.index(COLUMN_IS_PROCESSED) + 1
+                sheet.update_cell(cell.row, col_idx, "Yes")
+    except Exception as e:
+        st.error(f"Google Sheets güncellenirken bir hata oluştu: {e}")
 
 
 # ==========================================
@@ -611,14 +625,14 @@ if not df.empty:
                 # İşlem bittiğinde (hata alsa bile) butonu tekrar aç
                 st.session_state.processing = False
                 st.rerun()
-    with c3:
+   with c3:
         st.write("**Toplu İşlem**")
         if st.button(f"Filtreli {len(filtered_df)} Kişiyi Drive'a Gönder"):
-            # Güncel işlenmiş token listesini al
-            processed_tokens = get_processed_tokens()
-
-            # Sadece henüz işlenmemiş olanları filtrele
-            to_process_df = filtered_df[~filtered_df[COLUMN_TOKEN_ID].isin(processed_tokens)]
+            
+            if COLUMN_IS_PROCESSED in filtered_df.columns:
+                to_process_df = filtered_df[filtered_df[COLUMN_IS_PROCESSED].astype(str).str.strip().str.lower() != "yes"]
+            else:
+                to_process_df = filtered_df 
 
             if to_process_df.empty:
                 st.info("Seçili listedeki tüm adaylar zaten daha önce gönderilmiş.")
@@ -634,10 +648,11 @@ if not df.empty:
                     process_and_upload_single(c_name, row, drive_service, all_cv_cols, silent=True)
 
                     progress_bar.progress((i + 1) / total)
-                    time.sleep(1)  # Kota koruması için kısa mola
+                    time.sleep(1)  
 
                 st.success(f"✅ Yeni {total} aday Drive'a yüklendi!")
                 status_text.empty()
+                st.cache_data.clear()
 
     st.markdown("---")
     st.subheader("🛠️ Bakım ve Geri Dönük İşlemler")
