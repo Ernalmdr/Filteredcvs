@@ -609,15 +609,13 @@ if not df.empty:
 
     with c2:
         st.write("**Bireysel İşlem**")
-        # İşlem sürüyorsa butonu disabled yap
-        btn_single = st.button(
-            "Seçiliyi Drive'a Gönder",
-            disabled=st.session_state.processing,
-            on_click=set_processing,
-            args=(True,)
-        )
-
-        if btn_single:
+        
+        if st.button("Seçiliyi Drive'a Gönder"):
+            # st.spinner ile ekranda dönen bir yükleniyor animasyonu gösterir
+            with st.spinner(f"⏳ {sel_name} işleniyor, lütfen bekleyin..."):
+                row = filtered_df[filtered_df[name_col] == sel_name].iloc[0]
+                process_and_upload_single(sel_name, row, drive_service, all_cv_cols)
+                
             try:
                 row = filtered_df[filtered_df[name_col] == sel_name].iloc[0]
                 process_and_upload_single(sel_name, row, drive_service, all_cv_cols)
