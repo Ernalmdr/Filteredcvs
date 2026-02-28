@@ -111,7 +111,7 @@ def upload_to_drive(service, file_bytes, file_name, categories):
 
         # --- YENİ: Dosya Var mı Kontrolü ---
         check_query = f"name = '{file_name}' and '{folder_id}' in parents and trashed = false"
-        existing_files = service.files().list(q=check_query, supportsAllDrives=True).execute().get('files', [])
+        existing_files = service.files().list(q=check_query, supportsAllDrives=True, includeItemsFromAllDrives=True).execute().get('files', [])
 
         if existing_files:
             # Dosya zaten varsa üstüne yazmak yerine atla veya güncelle
@@ -408,7 +408,8 @@ def process_and_upload_single(name, row, service, cv_cols, silent=False):
             # 2. KONTROL: Yapay Zeka JSON üretebildi mi?
             if cv_json:
                 new_pdf_bytes = create_standardized_pdf(cv_json)
-                cats = cv_json.get("suggested_categories", ["Others"])
+                raw_cats = cv_json.get("suggested_categories", ["Others"])
+                cats = list(set(raw_cats)) if isinstance(raw_cats, list) and len(raw_cats) > 0 else ["Others"]
 
                 success = upload_to_drive(service, new_pdf_bytes, f"{name}_Standart.pdf", cats)
 
@@ -416,12 +417,15 @@ def process_and_upload_single(name, row, service, cv_cols, silent=False):
                 if pool_folder_id:
                     for cat in cats:
                         cat_folder_id = get_or_create_drive_folder(service, cat, pool_folder_id)
-                        try:
-                            orig_media = MediaIoBaseUpload(io.BytesIO(resp.content), mimetype='application/pdf')
-                            orig_meta = {'name': f"{name}_Orijinal.pdf", 'parents': [cat_folder_id]}
-                            service.files().create(body=orig_meta, media_body=orig_media, supportsAllDrives=True).execute()
-                        except Exception as e:
-                            if not silent: st.warning(f"⚠️ {name} orijinal CV eklenirken hata: {e}")
+                        check_query = f"name = '{name}_Orijinal.pdf' and '{cat_folder_id}' in parents and trashed = false"
+                        existing = service.files().list(q=check_query, supportsAllDrives=True, includeItemsFromAllDrives=True).execute().get('files', [])
+                        if not existing:
+                            try:
+                                orig_media = MediaIoBaseUpload(io.BytesIO(resp.content), mimetype='application/pdf')
+                                orig_meta = {'name': f"{name}_Orijinal.pdf", 'parents': [cat_folder_id]}
+                                service.files().create(body=orig_meta, media_body=orig_media, supportsAllDrives=True).execute()
+                            except Exception as e:
+                                if not silent: st.warning(f"⚠️ {name} orijinal CV eklenirken hata: {e}")
 
                 # 3. KONTROL: Drive'a başarıyla yüklendi mi?
                 if success:
