@@ -593,7 +593,7 @@ if not df.empty:
                      c.startswith(COLUMN_TOKEN_ID) or c.startswith(COLUMN_PDF_URL_BASE)]
         display_df = display_df.drop(columns=cols_hide, errors='ignore')
 
-    st.dataframe(display_df, use_container_width=True)
+    st.dataframe(display_df)
 
     # --- İŞLEM PANELİ ---
     st.markdown("---")
