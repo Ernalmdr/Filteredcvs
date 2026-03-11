@@ -378,7 +378,7 @@ def process_and_upload_single(name, row, service, cv_cols, silent=False):
                 pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))
                 img = PIL.Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
 
-                vision_model = genai.GenerativeModel('gemini-1.5-flash') # Modeli güncelledik (daha kararlı)
+                vision_model = genai.GenerativeModel('gemini-3-flash-preview') # Modeli güncelledik (daha kararlı)
                 
                 prompt = f"""
                     Analyze this CV image. Extract the information and format it as JSON.
