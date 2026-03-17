@@ -141,27 +141,31 @@ def extract_data_with_gemini(text_content):
 
         STRICT RULES FOR ENHANCEMENT:
         1. PROFESSIONAL TONE: Use strong action verbs (e.g., "Spearheaded", "Optimized", "Engineered").
-        2. QUANTIFIABLE IMPACT: Where possible, transform descriptions into achievement-based statements using numerical data (percentages, time saved, budget managed). If specific numbers aren't present, use placeholders or professional phrasing that implies scale.
+        2. QUANTIFIABLE IMPACT: Transform descriptions into achievement-based statements using numerical data. If missing, use professional phrasing that implies significant scale or efficiency.
         3. SUMMARY: Rewrite the 'summary' to be a powerful elevator pitch.
-        4. EXPERIENCE: Rewrite job descriptions to focus on results rather than just duties.
+        4. EXPERIENCE: Focus on results rather than duties.
+        5. ELEVATION & PRESTIGE: Elevate every task mentioned. Describe routine tasks in a way that reflects high responsibility, strategic importance, and leadership.
+        6. CHRONOLOGY: Precisely extract and format the start and end dates for each experience.
 
         Pick one or more categories for 'suggested_categories' ONLY from this list: {ALLOWED_CATEGORIES}.
-        Return ONLY JSON. No markdown formatting. If missing, leave empty. 
+        Return ONLY JSON. No markdown formatting.
 
         JSON Schema:
         {{
             "name": "Full Name",
-            "suggested_categories": ["Category from the list"],
+            "suggested_categories": ["Category"],
             "title": "Professional Title",
             "location": "City",
-            "summary": "Enhanced professional summary with a focus on value proposition",
+            "summary": "Enhanced professional summary",
             "education": [{{ "degree": "", "school": "", "year": "" }}],
             "experience": [{{ 
                 "role": "", 
                 "company": "", 
-                "description": "Enhanced description with numerical achievements and action verbs" 
+                "start_date": "MM/YYYY or Year",
+                "end_date": "MM/YYYY, Year, or 'Present'",
+                "description": "Elevated and enhanced description with high-impact phrasing" 
             }}],
-            "skills": {{ "tech": "List of technical skills" }},
+            "skills": {{ "tech": "List" }},
             "spoken_languages": "List"
         }}
 
@@ -381,20 +385,37 @@ def process_and_upload_single(name, row, service, cv_cols, silent=False):
                 vision_model = genai.GenerativeModel('gemini-3-flash-preview') # Modeli güncelledik (daha kararlı)
                 
                 prompt = f"""
-                    Analyze this CV image. Extract the information and format it as JSON.
-                    Categories must be from: {ALLOWED_CATEGORIES}
-
+                    Act as a professional HR expert and Resume Writer. 
+                    Your goal is to extract data from the provided CV and ENHANCE it to make the candidate stand out.
+            
+                    STRICT RULES FOR ENHANCEMENT:
+                    1. PROFESSIONAL TONE: Use strong action verbs (e.g., "Spearheaded", "Optimized", "Engineered").
+                    2. QUANTIFIABLE IMPACT: Transform descriptions into achievement-based statements using numerical data. If missing, use professional phrasing that implies significant scale or efficiency.
+                    3. SUMMARY: Rewrite the 'summary' to be a powerful elevator pitch.
+                    4. EXPERIENCE: Focus on results rather than duties.
+                    5. ELEVATION & PRESTIGE: Elevate every task mentioned. Describe routine tasks in a way that reflects high responsibility, strategic importance, and leadership.
+                    6. CHRONOLOGY: Precisely extract and format the start and end dates for each experience.
+            
+                    Pick one or more categories for 'suggested_categories' ONLY from this list: {ALLOWED_CATEGORIES}.
+                    Return ONLY JSON. No markdown formatting.
+            
                     JSON Schema:
                     {{
                         "name": "Full Name",
                         "suggested_categories": ["Category"],
-                        "title": "Title",
+                        "title": "Professional Title",
                         "location": "City",
-                        "summary": "Professional summary",
-                        "education": [],
-                        "experience": [],
-                        "skills": {{ "tech": "" }},
-                        "spoken_languages": ""
+                        "summary": "Enhanced professional summary",
+                        "education": [{{ "degree": "", "school": "", "year": "" }}],
+                        "experience": [{{ 
+                            "role": "", 
+                            "company": "", 
+                            "start_date": "MM/YYYY or Year",
+                            "end_date": "MM/YYYY, Year, or 'Present'",
+                            "description": "Elevated and enhanced description with high-impact phrasing" 
+                        }}],
+                        "skills": {{ "tech": "List" }},
+                        "spoken_languages": "List"
                     }}
                     """
                 response = vision_model.generate_content([prompt, img])
